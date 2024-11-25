@@ -8,6 +8,8 @@
 #include "ss/symtab.h"
 #include "../kernel_compat.h" // Add check Huawei Device
 
+#define KSU_SUPPORT_ADD_TYPE
+
 //////////////////////////////////////////////////////
 // Declaration
 //////////////////////////////////////////////////////
@@ -566,6 +568,7 @@ static bool add_filename_trans(struct policydb *db, const char *s,
 	db->compat_filename_trans_count++;
 	return ebitmap_set_bit(&trans->stypes, src->value - 1, 1) == 0;
 #else // < 5.7.0, has no filename_trans_key, but struct filename_trans
+
 	struct filename_trans key;
 	key.ttype = tgt->value;
 	key.tclass = cls->value;
@@ -594,7 +597,8 @@ static bool add_filename_trans(struct policydb *db, const char *s,
 		hashtab_insert(db->filename_trans, new_key, trans);
 	}
 
-	return ebitmap_set_bit(&db->filename_trans_ttypes, src->value - 1, 1) == 0;
+	return ebitmap_set_bit(&db->filename_trans_ttypes, src->value - 1, 1) ==
+	       0;
 #endif
 }
 
@@ -622,6 +626,7 @@ static void *ksu_realloc(void *old, size_t new_size, size_t old_size)
 
 static bool add_type(struct policydb *db, const char *type_name, bool attr)
 {
+#ifdef KSU_SUPPORT_ADD_TYPE
 	struct type_datum *type = symtab_search(&db->p_types, type_name);
 	if (type) {
 		pr_warn("Type %s already exists\n", type_name);
@@ -684,6 +689,56 @@ static bool add_type(struct policydb *db, const char *type_name, bool attr)
 	db->type_attr_map_array = new_type_attr_map_array;
 	ebitmap_init(&db->type_attr_map_array[value - 1]);
 	ebitmap_set_bit(&db->type_attr_map_array[value - 1], value - 1, 1);
+
+	db->type_val_to_struct = new_type_val_to_struct;
+	db->type_val_to_struct[value - 1] = type;
+
+	db->sym_val_to_name[SYM_TYPES] = new_val_to_name_types;
+	db->sym_val_to_name[SYM_TYPES][value - 1] = key;
+
+	int i;
+	for (i = 0; i < db->p_roles.nprim; ++i) {
+		ebitmap_set_bit(&db->role_val_to_struct[i]->types, value - 1,
+				1);
+	}
+
+	return true;
+#elif defined(CONFIG_IS_HW_HISI)
+	/*
+   * Huawei use type_attr_map and type_val_to_struct.
+   * And use ebitmap not flex_array.
+   */
+	size_t new_size = sizeof(struct ebitmap) * db->p_types.nprim;
+	struct ebitmap *new_type_attr_map =
+		(krealloc(db->type_attr_map, new_size, GFP_ATOMIC));
+
+	struct type_datum **new_type_val_to_struct =
+		krealloc(db->type_val_to_struct,
+			 sizeof(*db->type_val_to_struct) * db->p_types.nprim,
+			 GFP_ATOMIC);
+
+	if (!new_type_attr_map) {
+		pr_err("add_type: alloc type_attr_map failed\n");
+		return false;
+	}
+
+	if (!new_type_val_to_struct) {
+		pr_err("add_type: alloc type_val_to_struct failed\n");
+		return false;
+	}
+
+	char **new_val_to_name_types =
+		krealloc(db->sym_val_to_name[SYM_TYPES],
+			 sizeof(char *) * db->symtab[SYM_TYPES].nprim,
+			 GFP_KERNEL);
+	if (!new_val_to_name_types) {
+		pr_err("add_type: alloc val_to_name failed\n");
+		return false;
+	}
+
+	db->type_attr_map = new_type_attr_map;
+	ebitmap_init(&db->type_attr_map[value - 1], HISI_SELINUX_EBITMAP_RO);
+	ebitmap_set_bit(&db->type_attr_map[value - 1], value - 1, 1);
 
 	db->type_val_to_struct = new_type_val_to_struct;
 	db->type_val_to_struct[value - 1] = type;
@@ -809,6 +864,10 @@ static bool add_type(struct policydb *db, const char *type_name, bool attr)
 	}
 	return true;
 #endif
+
+#else
+	return false;
+#endif
 }
 
 static bool set_type_state(struct policydb *db, const char *type_name,
@@ -845,8 +904,15 @@ static void add_typeattribute_raw(struct policydb *db, struct type_datum *type,
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0)
 	struct ebitmap *sattr = &db->type_attr_map_array[type->value - 1];
+#elif defined(CONFIG_IS_HW_HISI)
+	/*
+   *   HISI_SELINUX_EBITMAP_RO is Huawei's unique features.
+   */
+	struct ebitmap *sattr = &db->type_attr_map[type->value - 1],
+		       HISI_SELINUX_EBITMAP_RO;
 #else
-	struct ebitmap *sattr = flex_array_get(db->type_attr_map_array, type->value - 1);
+	struct ebitmap *sattr =
+		flex_array_get(db->type_attr_map_array, type->value - 1);
 #endif
 	ebitmap_set_bit(sattr, attr->value - 1, 1);
 
